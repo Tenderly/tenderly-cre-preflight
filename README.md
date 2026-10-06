@@ -342,7 +342,8 @@ bun run changeset
 
 When it lands on `main`, the release workflow opens a "Release" pull request
 that bumps the version and the changelog. Merging that pull request publishes
-to npm with provenance.
+to npm with provenance, through npm Trusted Publishing: the workflow
+authenticates with its GitHub OIDC identity, so no npm token is stored.
 
 ## License
 
