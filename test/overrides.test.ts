@@ -186,16 +186,27 @@ describe('erc20 funding failures', () => {
     )
   const fundDai = () => run({ fund: [{ token: DAI, holders: [ALICE], balance: 1n }] })
 
-  creTest('a refusal fails every run the same way, so it is misconfigured', () => {
-    // Not a token, or a token whose balance slot Tenderly cannot find.
-    fundingAnswers(() => rpcError('could not find balance slot', undefined, -32000))
+  creTest('a token with no findable balance slot is misconfigured', () => {
+    // Tenderly answers with a BadRequest: -32006, sent as HTTP 400. It
+    // fails the same way on every run, so it is config, not an outage.
+    fundingAnswers(() => rpcError('cannot find balance slot hash', undefined, -32006, 400))
     const verdict = fundDai()
     expect(verdict.outcome).toBe('misconfigured')
-    expect(verdict.reason).toContain('could not find balance slot')
+    expect(verdict.reason).toContain('cannot find balance slot hash')
+  })
+
+  creTest('a probe that reverts is misconfigured too', () => {
+    fundingAnswers(() => rpcError('execution reverted', undefined, 3))
+    expect(fundDai().outcome).toBe('misconfigured')
   })
 
   creTest('a node that could not answer is unavailable', () => {
-    fundingAnswers(() => rpcError('internal error', undefined, -32603))
+    fundingAnswers(() => rpcError('internal server error', undefined, -32603))
+    expect(fundDai().outcome).toBe('unavailable')
+  })
+
+  creTest('rate limiting is unavailable, read from its HTTP 429 body', () => {
+    fundingAnswers(() => rpcError('Too many requests', undefined, -32005, 429))
     expect(fundDai().outcome).toBe('unavailable')
   })
 })
