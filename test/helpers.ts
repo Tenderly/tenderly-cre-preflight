@@ -31,8 +31,12 @@ export const rpcResult = (result: unknown) => ({
   body: jsonBody({ jsonrpc: '2.0', id: 1, result }),
 })
 
-export const rpcError = (message: string, data?: string, code = 3) => ({
-  statusCode: 200,
+/**
+ * A JSON-RPC error. Tenderly sends most with HTTP 200, but some with the status
+ * of their category: 400 for -32006 BadRequest, 403, 408, 429.
+ */
+export const rpcError = (message: string, data?: string, code = 3, statusCode = 200) => ({
+  statusCode,
   body: jsonBody({ jsonrpc: '2.0', id: 1, error: { code, message, ...(data ? { data } : {}) } }),
 })
 

@@ -323,31 +323,69 @@ describe('cleanup of environments that exist', () => {
   })
 })
 
+/**
+ * Payloads as a Virtual Environment's RPC sends them: Tenderly's error code,
+ * with the HTTP status that code is sent with.
+ */
 describe('classifying a refused send', () => {
-  const sendError = (code: number, message: string) =>
-    mockHttp(answering('tenderly_sendTransaction', () => rpcError(message, undefined, code)))
+  const sendError = (code: number, message: string, status = 200) =>
+    mockHttp(answering('tenderly_sendTransaction', () => rpcError(message, undefined, code, status)))
 
-  creTest('a transaction-level refusal is `rejected`', () => {
-    sendError(-32000, 'insufficient funds for gas * price + value')
+  creTest('insufficient funds is code 3, and `rejected`', () => {
+    // Every EVM-level refusal is code 3, the same as a revert.
+    sendError(3, 'insufficient funds for gas * price + value')
     const verdict = run()
     expect(verdict.outcome).toBe('rejected')
     expect(verdict.reason).toBe('insufficient funds for gas * price + value')
   })
 
+  creTest('a nonce conflict is code 3, and `rejected`', () => {
+    sendError(3, 'nonce too low')
+    expect(run().outcome).toBe('rejected')
+  })
+
   creTest('a method the node does not know is `misconfigured`, not `rejected`', () => {
-    sendError(-32601, 'the method tenderly_sendTransaction does not exist')
+    sendError(-32601, 'method not found')
     expect(run().outcome).toBe('misconfigured')
   })
 
   creTest('invalid params are `misconfigured`, not `rejected`', () => {
-    sendError(-32602, 'invalid argument 1: hex string has length 66, want 64')
+    sendError(-32602, 'invalid params')
     expect(run().outcome).toBe('misconfigured')
   })
 
-  creTest('an internal node error is `unavailable`, not `rejected`', () => {
-    sendError(-32603, 'internal error')
-    expect(run().outcome).toBe('unavailable')
+  creTest('an unsupported feature is `misconfigured`', () => {
+    // Tenderly's -32002 is NotSupported, not EIP-1474's "resource unavailable".
+    sendError(-32002, 'not supported')
+    expect(run().outcome).toBe('misconfigured')
   })
+
+  creTest('a BadRequest is read from its HTTP 400 body, and `misconfigured`', () => {
+    sendError(-32006, 'block overrides: block number must be greater than the current block number', 400)
+    expect(run().outcome).toBe('misconfigured')
+  })
+
+  creTest('a permission error is read from its HTTP 403 body, and `misconfigured`', () => {
+    // Tenderly's -32003 is Unauthorized and -32004 Forbidden, not EIP-1474's
+    // "transaction rejected" and "method not supported".
+    sendError(-32004, 'Insufficient permissions', 403)
+    expect(run().outcome).toBe('misconfigured')
+  })
+
+  for (const [code, status, message] of [
+    [-32603, 200, 'internal server error'],
+    [-32005, 429, 'Too many requests'],
+    [-32009, 408, 'evm timeout'],
+    [-32010, 200, 'Service unavailable'],
+    [-32000, 200, 'state 0xabc is not available'],
+    [-32098, 200, 'missing trie node'],
+    [-32001, 200, 'Not found'],
+  ] as const) {
+    creTest(`${code} (${message}) is \`unavailable\`, not \`rejected\``, () => {
+      sendError(code, message, status)
+      expect(run().outcome).toBe('unavailable')
+    })
+  }
 })
 
 describe('retryable creation statuses', () => {
@@ -434,7 +472,7 @@ describe('credentials stay out of the log', () => {
     // the log and the verdict's `reason`, so both must be scrubbed.
     mockHttp(
       answering('tenderly_sendTransaction', () =>
-        rpcError(`nonce too low for ${ADMIN_RPC} (key access-key)`, undefined, -32000),
+        rpcError(`nonce too low for ${ADMIN_RPC} (key access-key)`, undefined, 3),
       ),
     )
     const runtime = runtimeWithSecret(KEY_SECRET, 'access-key')
