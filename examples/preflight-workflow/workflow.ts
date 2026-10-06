@@ -5,7 +5,7 @@
  * a real CRE project (`cre init`) and point `config.json` at your own contract.
  */
 import { CronCapability, handler, Runner, type Runtime } from '@chainlink/cre-sdk'
-import { TenderlyVNet, type TenderlyConfig, type TransactionInput } from '@tenderly/cre-sdk'
+import { TenderlyPreflight, type TenderlyConfig, type TransactionInput } from '@tenderly/cre-preflight'
 
 type Config = {
   schedule: string
@@ -14,7 +14,7 @@ type Config = {
 }
 
 export const onCronTrigger = (runtime: Runtime<Config>): string => {
-  const tenderly = new TenderlyVNet(runtime.config.tenderly)
+  const tenderly = new TenderlyPreflight(runtime.config.tenderly)
 
   // In a real workflow the transaction is built from whatever this execution
   // just worked out: a price fetched over HTTP, a report from runtime.report(),
@@ -36,8 +36,8 @@ export const onCronTrigger = (runtime: Runtime<Config>): string => {
       return `skipped: ${verdict.outcome}`
 
     case 'misconfigured':
-      // Nothing about the transaction is wrong. Something in the config or the
-      // Vault secret is, and every run will fail until it is fixed.
+      // The request can never succeed as written: the config, the Vault secret,
+      // or the funding passed with the call. Every run fails until it is fixed.
       runtime.log(`tenderly rejected the request: ${verdict.reason}`)
       return 'skipped: misconfigured'
 

@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import {
-  TenderlyVNet,
+  TenderlyPreflight,
   httpActionCost,
-  httpsUrlSchema,
   tenderlyConfigSchema,
   transactionSchema,
 } from '../src/index.js'
@@ -17,7 +16,7 @@ const base = {
 describe('config', () => {
   it('applies defaults so a minimal config is complete', () => {
     const parsed = tenderlyConfigSchema.parse(base)
-    expect(parsed.displayName).toBe('cre-tenderly-sdk')
+    expect(parsed.displayName).toBe('cre-preflight')
     expect(parsed.explainReverts).toBeTrue()
   })
 
@@ -64,33 +63,41 @@ describe('HTTP action budget', () => {
     expect(httpActionCost(tenderlyConfigSchema.parse({ ...base, explainReverts: false }))).toBe(4)
   })
 
-  it('can never be configured over the limit', () => {
-    // With no funding to compete for the budget, the only variable is
-    // explainReverts, and both settings fit.
-    for (const explainReverts of [true, false]) {
-      expect(new TenderlyVNet({ ...base, explainReverts }).httpActionCost)
-        .toBeLessThanOrEqual(5)
-    }
+  it('reports the per-instance cost before any per-call funding', () => {
+    expect(new TenderlyPreflight(base).httpActionCost).toBe(5)
+    expect(new TenderlyPreflight({ ...base, explainReverts: false }).httpActionCost).toBe(4)
+    expect(new TenderlyPreflight({ ...base, deleteEnvironment: false }).httpActionCost).toBe(4)
   })
 })
 
-describe('httpsUrlSchema', () => {
-  // zod's own .url() is unusable in a CRE workflow: it calls `new URL()`, and
-  // `URL` is undefined in QuickJS, so every value fails. Verified in simulation.
-  it('accepts ordinary https URLs', () => {
-    for (const url of [
-      'https://api.tenderly.co',
-      'https://api.eu.tenderly.co',
-      'https://api.tenderly.co/api/public/v1',
-      'https://localhost:8080',
-    ]) {
-      expect(httpsUrlSchema.safeParse(url).success).toBeTrue()
-    }
+describe('strict config', () => {
+  it('rejects a misspelled key instead of silently keeping the default', () => {
+    // `deleteEnviroment` and `explainRevert` would otherwise be dropped, and the
+    // operator's change would quietly have no effect.
+    expect(() => tenderlyConfigSchema.parse({ ...base, deleteEnviroment: false })).toThrow()
+    expect(() => tenderlyConfigSchema.parse({ ...base, explainRevert: false })).toThrow()
   })
 
-  it('rejects non-https and malformed values', () => {
-    for (const url of ['http://api.tenderly.co', 'ftp://x.co', 'api.tenderly.co', 'https://', '']) {
-      expect(httpsUrlSchema.safeParse(url).success).toBeFalse()
-    }
+  it('rejects an unknown key inside fork', () => {
+    expect(() =>
+      tenderlyConfigSchema.parse({ ...base, fork: { ...base.fork, blockNumber: '1' } }),
+    ).toThrow()
+  })
+
+  it('rejects transaction fields it does not support rather than dropping them', () => {
+    const from = '0x1111111111111111111111111111111111111111'
+    const to = '0x2222222222222222222222222222222222222222'
+    // Calldata under `input` would otherwise be dropped and `data` default to
+    // 0x, so an empty call would be simulated in place of the real one.
+    expect(() => transactionSchema.parse({ from, to, input: '0xdeadbeef' })).toThrow()
+    expect(() => transactionSchema.parse({ from, to, nonce: '0x1' })).toThrow()
+    expect(() => transactionSchema.parse({ from, to, gasPrice: '0x1' })).toThrow()
+  })
+
+  it('rejects a value that does not fit in 256 bits', () => {
+    const from = '0x1111111111111111111111111111111111111111'
+    const to = '0x2222222222222222222222222222222222222222'
+    expect(transactionSchema.safeParse({ from, to, value: `0x${'f'.repeat(64)}` }).success).toBeTrue()
+    expect(transactionSchema.safeParse({ from, to, value: `0x1${'0'.repeat(64)}` }).success).toBeFalse()
   })
 })

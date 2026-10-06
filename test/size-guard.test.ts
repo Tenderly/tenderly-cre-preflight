@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { HttpActionsMock, test as creTest } from '@chainlink/cre-sdk/test'
 import {
   RESPONSE_SIZE_LIMIT,
-  TenderlyVNet,
+  TenderlyPreflight,
   isSizeRejection,
   tenderlyConfigSchema,
 } from '../src/index.js'
@@ -21,7 +21,7 @@ const base = {
 }
 
 const run = (config: Parameters<typeof tenderlyConfigSchema.parse>[0] = base) =>
-  new TenderlyVNet(config as never).sendTransaction(runtimeWithSecret(KEY, 'access-key'), {
+  new TenderlyPreflight(config as never).sendTransaction(runtimeWithSecret(KEY, 'access-key'), {
     from: FROM,
     to: TO,
   })
@@ -62,6 +62,19 @@ describe('isSizeRejection', () => {
     expect(isSizeRejection('connection refused')).toBeFalse()
     expect(isSizeRejection('unauthorized')).toBeFalse()
     expect(isSizeRejection('execution reverted')).toBeFalse()
+  })
+
+  it('does not mistake a timeout or a call quota for a size rejection', () => {
+    for (const message of [
+      'response timeout exceeded',
+      'response deadline exceeded',
+      'body read exceeded deadline',
+      'HTTP response exceeded deadline',
+      'payload exceeds max call limit',
+      'request timed out',
+    ]) {
+      expect(isSizeRejection(message)).toBeFalse()
+    }
   })
 })
 
@@ -136,6 +149,17 @@ describe('size guard', () => {
       throw new Error('response buffer too small')
     }
     expect(run().outcome).toBe('oversized')
+  })
+
+  creTest('classifies a capability timeout as unavailable, not oversized', () => {
+    const http = HttpActionsMock.testInstance()
+    http.sendRequest = (request) => {
+      if (String(request.url).endsWith('/environments') && String(request.method) === 'POST') {
+        return { statusCode: 200, body: jsonBody(environmentResponse()) }
+      }
+      throw new Error('http: response timeout exceeded')
+    }
+    expect(run().outcome).toBe('unavailable')
   })
 
   creTest('classifies a non-size capability error as unavailable', () => {

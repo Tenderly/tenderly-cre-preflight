@@ -1,4 +1,5 @@
-import type { NodeRuntime, Runtime } from '@chainlink/cre-sdk'
+import { SecretsError, type NodeRuntime, type Runtime } from '@chainlink/cre-sdk'
+import { z } from 'zod'
 import {
   tenderlyConfigSchema,
   transactionSchema,
@@ -9,9 +10,10 @@ import {
 } from './config.js'
 import { EnvironmentRequestError, createEnvironment, deleteEnvironment } from './environment.js'
 import { resolveForkBlock } from './fork-block.js'
-import { decodeRevertReason, isRevertError } from './revert.js'
-import { asRecord, jsonRpc } from './rpc.js'
+import { parseQuantity, toHexQuantity } from './hex.js'
 import { ResponseTooLargeError } from './http.js'
+import { decodeRevertReason, isRevertError } from './revert.js'
+import { asRecord, classifyRpcError, jsonRpc, type RpcOutcome } from './rpc.js'
 import {
   buildStateOverrides,
   fundHttpActionCost,
@@ -50,6 +52,9 @@ export interface SendTransactionOptions {
    * Use it when the workflow already knows the height it cares about — an EVM
    * log trigger payload carries the block its event was emitted in — which is
    * both cheaper and more precise than resolving a tag.
+   *
+   * A native `bigint`. A log's `blockNumber` is a protobuf BigInt, so convert
+   * it with `protoBigIntToBigint` from `@chainlink/cre-sdk` first.
    */
   forkBlockNumber?: bigint
   /**
@@ -71,51 +76,81 @@ export interface SendTransactionOptions {
   stateOverrides?: StateOverrides
 }
 
-const toHexQuantity = (value: bigint | string): string =>
-  `0x${(typeof value === 'bigint' ? value : BigInt(value)).toString(16)}`
+const forkBlockNumberSchema = z.bigint().positive('forkBlockNumber must be a positive bigint')
+
+/**
+ * A request that can never succeed as written: a funding entry Tenderly cannot
+ * apply, or a send the node cannot parse. Reported as `misconfigured`, because
+ * retrying the same input on the next run will fail the same way.
+ */
+class RequestRefusedError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'RequestRefusedError'
+  }
+}
 
 const txObject = (tx: ResolvedTransaction): Record<string, string> => {
   const call: Record<string, string> = { from: tx.from, to: tx.to, data: tx.data, value: tx.value }
-  if (tx.gas) call.gas = toHexQuantity(tx.gas)
+  if (tx.gas) call.gas = toHexQuantity(BigInt(tx.gas))
   return call
 }
 
-const toBigInt = (value: unknown): bigint =>
-  typeof value === 'string' && /^0x[0-9a-fA-F]+$/.test(value) ? BigInt(value) : 0n
+const describeError = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error)
+
+/**
+ * Remove credentials from anything headed for the node log or the verdict.
+ *
+ * The Admin RPC URL grants full control of the environment, and capability
+ * errors are free text we do not control, so every message is scrubbed of it
+ * and of the access key before it leaves this module.
+ */
+const scrubber =
+  (secrets: string[]) =>
+  (message: string): string =>
+    secrets.reduce(
+      (text, secret) => (secret ? text.split(secret).join('<redacted>') : text),
+      message,
+    )
 
 /**
  * Recover a revert reason by replaying the call against the parent block.
  *
  * The transaction has already been mined, so `latest` would evaluate the state
  * left behind by the revert rather than the state it faced. `blockNumber - 1`
- * reproduces the conditions the transaction actually met.
+ * plus the state overrides the transaction was sent with reproduces the
+ * conditions it actually met: the overrides are what made a funded sender
+ * funded, or a stubbed contract stubbed, so leaving them out replays a
+ * different transaction. ERC20 funding needs no such help: it was written to
+ * the fork before the send, so the parent block already holds it.
  *
- * State overrides are deliberately NOT replayed here. They are applied with the
- * transaction, so the parent block never had them, and re-applying them would
- * be reconstructing a state that never existed. Verified against a live fork:
- * a transaction funded purely by a balance override still reports its true
- * revert reason on replay, because `eth_call` does not charge the caller for
- * gas when no gasPrice is set.
+ * Best effort. The receipt has already proved the revert; failing to explain it
+ * returns `''` and never turns that answer into an outage.
  */
 const explainRevert = (
   runtime: NodeRuntime<unknown>,
   rpcUrl: string,
   tx: ResolvedTransaction,
-  blockNumber: bigint,
+  overrides: Record<string, unknown> | undefined,
+  blockNumber: bigint | null,
   maxResponseBytes: number,
+  scrub: (message: string) => string,
 ): string => {
-  if (blockNumber === 0n) return ''
-  const replay = jsonRpc(
-    runtime,
-    rpcUrl,
-    'eth_call',
-    [txObject(tx), toHexQuantity(blockNumber - 1n)],
-    { store: false },
-    maxResponseBytes,
-  )
+  if (blockNumber === null || blockNumber === 0n) return ''
+  const params: unknown[] = [txObject(tx), toHexQuantity(blockNumber - 1n)]
+  if (overrides) params.push(overrides)
+
+  let replay: RpcOutcome
+  try {
+    replay = jsonRpc(runtime, rpcUrl, 'eth_call', params, maxResponseBytes)
+  } catch (error) {
+    runtime.log(`tenderly: could not recover the revert reason: ${scrub(describeError(error))}`)
+    return ''
+  }
   if (replay.ok) return ''
   if (!isRevertError(replay.error.message, replay.error.data)) return ''
-  return decodeRevertReason(replay.error.data) || replay.error.message
+  return scrub(decodeRevertReason(replay.error.data) || replay.error.message)
 }
 
 /** One HTTP action per entry. Funds every holder in the entry at once. */
@@ -130,12 +165,29 @@ const applyErc20Funding = (
     rpcUrl,
     'tenderly_setErc20Balance',
     [entry.token, entry.holders, entry.balance],
-    { store: false },
     maxResponseBytes,
   )
-  if (!funded.ok) {
-    throw new Error(`tenderly_setErc20Balance on ${entry.token} failed: ${funded.error.message}`)
-  }
+  if (funded.ok) return
+  const message = `tenderly_setErc20Balance on ${entry.token} failed: ${funded.error.message}`
+  // Tenderly answering with a refusal (not a token, no balance slot it can
+  // find) fails identically on every run, so it is a config problem, not an
+  // outage. Only a failure to get an answer at all is worth retrying.
+  if (classifyRpcError(funded.error) === 'transient') throw new Error(message)
+  throw new RequestRefusedError(message)
+}
+
+/**
+ * Read a receipt's status. Only an explicit success or failure counts: a
+ * receipt with no usable status proves nothing, and treating it as a revert
+ * would invent an answer.
+ */
+const receiptSucceeded = (status: unknown): boolean => {
+  if (status === true) return true
+  if (status === false) return false
+  const value = parseQuantity(status)
+  if (value === 1n) return true
+  if (value === 0n) return false
+  throw new Error('receipt carries no usable status')
 }
 
 /**
@@ -148,10 +200,15 @@ const applyErc20Funding = (
 const runSendTransaction = (runtime: NodeRuntime<unknown>, input: NodeInput): TransactionVerdict => {
   const { config, tx, fund, stateOverrides, accessKey, forkBlockNumber } = input
   let environmentId: string | null = null
+  let scrub = scrubber([accessKey])
 
   try {
-    const environment = createEnvironment(runtime, config, accessKey, forkBlockNumber)
-    environmentId = environment.environmentId
+    const environment = createEnvironment(runtime, config, accessKey, forkBlockNumber, (id) => {
+      // Recorded before the response is validated, so an environment that
+      // exists is cleaned up even when the rest of its response is unusable.
+      environmentId = id
+    })
+    scrub = scrubber([accessKey, environment.adminRpcUrl])
 
     // The chain id comes from the creation response. Confirming it with an
     // eth_chainId round trip would spend an HTTP action to re-learn something
@@ -181,20 +238,26 @@ const runSendTransaction = (runtime: NodeRuntime<unknown>, input: NodeInput): Tr
       environment.adminRpcUrl,
       'tenderly_sendTransaction',
       params,
-      { store: false },
       config.maxResponseBytes,
     )
     if (!sent.ok) {
       // A revert does NOT arrive here: a Virtual Environment accepts and mines a
-      // reverting transaction and reports it through the receipt. An error from
-      // the node at this point means it refused the transaction before running
+      // reverting transaction and reports it through the receipt. A refusal at
+      // this point means the node turned the transaction down before running
       // it, most often insufficient funds for gas. That is an answer, so it
-      // gets its own outcome rather than being reported as an outage.
-      if (sent.error.kind === 'rpc') {
-        runtime.log(`tenderly: transaction rejected before execution: ${sent.error.message}`)
-        return rejectedVerdict(sent.error.message)
+      // gets its own outcome. A request the node could not parse says nothing
+      // about the transaction, and neither does a node that could not answer.
+      switch (classifyRpcError(sent.error)) {
+        case 'refused': {
+          const reason = scrub(sent.error.message)
+          runtime.log(`tenderly: transaction rejected before execution: ${reason}`)
+          return rejectedVerdict(reason)
+        }
+        case 'malformed':
+          throw new RequestRefusedError(`tenderly_sendTransaction failed: ${sent.error.message}`)
+        case 'transient':
+          throw new Error(`tenderly_sendTransaction failed: ${sent.error.message}`)
       }
-      throw new Error(`tenderly_sendTransaction failed: ${sent.error.message}`)
     }
 
     const transactionHash = sent.result
@@ -207,7 +270,6 @@ const runSendTransaction = (runtime: NodeRuntime<unknown>, input: NodeInput): Tr
       environment.adminRpcUrl,
       'eth_getTransactionReceipt',
       [transactionHash],
-      { store: false },
       config.maxResponseBytes,
     )
     if (!received.ok) throw new Error(`eth_getTransactionReceipt failed: ${received.error.message}`)
@@ -222,8 +284,8 @@ const runSendTransaction = (runtime: NodeRuntime<unknown>, input: NodeInput): Tr
       throw new Error('receipt does not match the submitted transaction')
     }
 
-    const succeeded = receipt.status === '0x1' || receipt.status === 1 || receipt.status === true
-    const gasUsed = config.includeGasUsed ? toBigInt(receipt.gasUsed) : 0n
+    const succeeded = receiptSucceeded(receipt.status)
+    const gasUsed = config.includeGasUsed ? (parseQuantity(receipt.gasUsed) ?? 0n) : 0n
 
     // Per-node values. They differ on every node, so they can only be logged;
     // a field that is not identical across the DON cannot survive consensus.
@@ -238,8 +300,10 @@ const runSendTransaction = (runtime: NodeRuntime<unknown>, input: NodeInput): Tr
           runtime,
           environment.adminRpcUrl,
           tx,
-          toBigInt(receipt.blockNumber),
+          overrides,
+          parseQuantity(receipt.blockNumber),
           config.maxResponseBytes,
+          scrub,
         )
       : ''
 
@@ -250,19 +314,22 @@ const runSendTransaction = (runtime: NodeRuntime<unknown>, input: NodeInput): Tr
     // transaction is too complex to inspect this way, not the infrastructure
     // being down. Reporting both as `unavailable` would hide that.
     if (error instanceof ResponseTooLargeError) {
-      runtime.log(`tenderly: response too large to use: ${error.message}`)
+      runtime.log(`tenderly: response too large to use: ${scrub(error.message)}`)
       return oversizedVerdict()
     }
     // Tenderly understood the request and refused it. Reporting an unsupported
     // network or a missing project as `unavailable` would send an operator
     // looking at infrastructure for something only a config change fixes, and a
     // workflow on a cron would retry it forever.
-    if (error instanceof EnvironmentRequestError && error.isPermanent) {
-      runtime.log(`tenderly: request rejected: ${error.message}`)
-      return misconfiguredVerdict(error.message)
+    if (
+      (error instanceof EnvironmentRequestError && error.isPermanent) ||
+      error instanceof RequestRefusedError
+    ) {
+      const reason = scrub(error.message)
+      runtime.log(`tenderly: request rejected: ${reason}`)
+      return misconfiguredVerdict(reason)
     }
-    const detail = error instanceof Error ? error.message : String(error)
-    runtime.log(`tenderly: unavailable: ${detail}`)
+    runtime.log(`tenderly: unavailable: ${scrub(describeError(error))}`)
     return unavailableVerdict()
   } finally {
     if (environmentId) {
@@ -295,7 +362,7 @@ export const httpActionCost = (
   (config.explainReverts ? 1 : 0) +
   fundHttpActionCost(fund)
 
-export class TenderlyVNet {
+export class TenderlyPreflight {
   private readonly config: ResolvedTenderlyConfig
 
   constructor(config: TenderlyConfig) {
@@ -322,6 +389,11 @@ export class TenderlyVNet {
    * Call this from a DON-mode callback. The access key is resolved here,
    * because `NodeRuntime` has no secrets provider — only `Runtime` does — and
    * then passed into node mode with the rest of the input.
+   *
+   * Throws only for invalid arguments: a malformed transaction, funding entry,
+   * override, or fork block. Everything that can go wrong at run time,
+   * including an unreadable secret or an unresolvable fork tag, comes back as a
+   * verdict, so a workflow can always decide by switching on `outcome`.
    */
   sendTransaction<C>(
     runtime: Runtime<C>,
@@ -334,14 +406,35 @@ export class TenderlyVNet {
       options.stateOverrides === undefined
         ? undefined
         : stateOverridesSchema.parse(options.stateOverrides)
+    const pinnedBlock =
+      options.forkBlockNumber === undefined
+        ? undefined
+        : forkBlockNumberSchema.parse(options.forkBlockNumber)
 
-    const accessKey = runtime.getSecret({ id: this.config.accessKeySecretId }).result().value
+    // Everything below runs in DON mode on consensus-verified inputs, so every
+    // node reaches the same early verdict without needing consensus of its own.
+    const secretId = this.config.accessKeySecretId
+    let accessKey: string
+    try {
+      accessKey = runtime.getSecret({ id: secretId }).result().value
+    } catch (error) {
+      if (!(error instanceof SecretsError)) throw error
+      runtime.log(`tenderly: ${error.message}`)
+      return misconfiguredVerdict(`CRE secret '${secretId}' could not be read`)
+    }
     if (!accessKey) {
-      throw new Error(`CRE secret '${this.config.accessKeySecretId}' is missing or empty`)
+      runtime.log(`tenderly: CRE secret '${secretId}' is empty`)
+      return misconfiguredVerdict(`CRE secret '${secretId}' is empty`)
     }
 
     // Resolved here, in DON mode, so all nodes fork at one agreed height.
-    const forkBlockNumber = options.forkBlockNumber ?? resolveForkBlock(runtime, this.config.fork)
+    let forkBlockNumber: bigint
+    try {
+      forkBlockNumber = pinnedBlock ?? resolveForkBlock(runtime, this.config.fork)
+    } catch (error) {
+      runtime.log(`tenderly: unavailable: could not resolve the fork block: ${describeError(error)}`)
+      return unavailableVerdict()
+    }
 
     return runtime
       .runInNodeMode(runSendTransaction, verdictConsensus)({

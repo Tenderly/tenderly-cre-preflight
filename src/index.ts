@@ -1,5 +1,5 @@
 export {
-  TenderlyVNet,
+  TenderlyPreflight,
   httpActionCost,
   type SendTransactionOptions,
 } from './simulate.js'
@@ -7,7 +7,6 @@ export { resolveForkBlock } from './fork-block.js'
 export {
   tenderlyConfigSchema,
   transactionSchema,
-  httpsUrlSchema,
   type TenderlyConfig,
   type ResolvedTenderlyConfig,
   type TransactionInput,
@@ -38,5 +37,4 @@ export {
   RESPONSE_SIZE_LIMIT,
   ResponseTooLargeError,
   isSizeRejection,
-  type CacheOptions,
 } from './http.js'
