@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    branches: [master]
+    branches: [main]
 
 concurrency: ${{ github.workflow }}-${{ github.ref }}
 
@@ -14,7 +14,7 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
-    # NPM_TOKEN lives in this environment, which only master can deploy to.
+    # NPM_TOKEN lives in this environment, which only main can deploy to.
     environment: npm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
