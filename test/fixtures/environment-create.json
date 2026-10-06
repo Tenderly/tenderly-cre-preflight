@@ -1,0 +1,145 @@
+{
+  "id": "dd2db4f3-94e5-4663-ab8b-ad9231b613cd",
+  "display_name": "cre-sdk-shape-probe",
+  "description": "",
+  "slug": "28a479",
+  "networks": [
+    {
+      "id": "92574411-36d0-48d2-8d59-353c99e9748e",
+      "network_id": "11155111",
+      "network_name": "Sepolia",
+      "network_type": "vnet",
+      "block_number": "0x5b8d80",
+      "chain_config_overrides": {
+        "chain_id": "11155111"
+      },
+      "accounts": [
+        {
+          "address": "0x2879B8EB4804Ea26aEE178AAf9fAa56Bb5A94b6B"
+        },
+        {
+          "address": "0x849d2C7905094fd536064589EB6ed4bfFb643095"
+        },
+        {
+          "address": "0xeDE6D508D2916F59E3352B5F5715c46D1011CC53"
+        },
+        {
+          "address": "0x881518bEA7A5EA089BC12C26790588EF584e2e97"
+        },
+        {
+          "address": "0xfb29515904E68B1E7cb58300cAfBbfc7c1079CfC"
+        },
+        {
+          "address": "0x41659A80f7afDC951Cc396dB16bF3C8b487c0E0C"
+        },
+        {
+          "address": "0xD7C096df00a5390712C96F0E4E2FB7888f16dD1D"
+        },
+        {
+          "address": "0xaa8CaC7b8AD2eC45361AB3Ac95a0279E15404877"
+        },
+        {
+          "address": "0xA8A8237300a206F4570D734BEBcFFc3f57A50c38"
+        },
+        {
+          "address": "0x2f5B875e5bEFDdD02E4997cBf559349F1a70299F"
+        }
+      ],
+      "region": "eu",
+      "explorer_config": {
+        "enabled": false,
+        "verification_visibility": "src"
+      }
+    }
+  ],
+  "active_instance": {
+    "id": "99631dc3-7ddc-4d71-9909-309f939ffae3",
+    "bridge_config": {
+      "enabled": false,
+      "relay_mode": "autoRelay"
+    },
+    "vnets": [
+      {
+        "id": "5356d35b-996f-4014-b2a4-fd1b653f320e",
+        "created_at": "2026-09-24T10:02:40.50096001Z",
+        "slug": "5df981",
+        "display_name": "5df981",
+        "status": "running",
+        "fork_config": {
+          "network_id": 11155111,
+          "block_number": "0x5b8d80"
+        },
+        "virtual_network_config": {
+          "chain_config": {
+            "chain_id": 11155111
+          },
+          "accounts": [
+            {
+              "address": "0x2879B8EB4804Ea26aEE178AAf9fAa56Bb5A94b6B"
+            },
+            {
+              "address": "0x849d2C7905094fd536064589EB6ed4bfFb643095"
+            },
+            {
+              "address": "0xeDE6D508D2916F59E3352B5F5715c46D1011CC53"
+            },
+            {
+              "address": "0x881518bEA7A5EA089BC12C26790588EF584e2e97"
+            },
+            {
+              "address": "0xfb29515904E68B1E7cb58300cAfBbfc7c1079CfC"
+            },
+            {
+              "address": "0x41659A80f7afDC951Cc396dB16bF3C8b487c0E0C"
+            },
+            {
+              "address": "0xD7C096df00a5390712C96F0E4E2FB7888f16dD1D"
+            },
+            {
+              "address": "0xaa8CaC7b8AD2eC45361AB3Ac95a0279E15404877"
+            },
+            {
+              "address": "0xA8A8237300a206F4570D734BEBcFFc3f57A50c38"
+            },
+            {
+              "address": "0x2f5B875e5bEFDdD02E4997cBf559349F1a70299F"
+            }
+          ]
+        },
+        "sync_state_config": {
+          "enabled": false
+        },
+        "explorer_page_config": {
+          "enabled": false,
+          "verification_visibility": "src"
+        },
+        "rpcs": [
+          {
+            "url": "https://virtual.sepolia.eu.rpc.tenderly.co/tenderly/acct/proj/REDACTED",
+            "name": "Admin RPC"
+          },
+          {
+            "url": "https://virtual.sepolia.eu.rpc.tenderly.co/tenderly/acct/proj/REDACTED",
+            "name": "Admin websocket RPC"
+          },
+          {
+            "url": "https://virtual.sepolia.eu.rpc.tenderly.co/tenderly/acct/proj/REDACTED",
+            "name": "Public RPC"
+          },
+          {
+            "url": "https://virtual.sepolia.eu.rpc.tenderly.co/tenderly/acct/proj/REDACTED",
+            "name": "Public websocket RPC"
+          }
+        ]
+      }
+    ],
+    "created_at": "2026-09-24T10:02:40.50094813Z",
+    "updated_at": "2026-09-24T10:02:40.50094819Z"
+  },
+  "bridge_config": {
+    "enabled": false,
+    "relay_mode": "autoRelay"
+  },
+  "created_at": "2026-09-24T10:02:40.50094407Z",
+  "updated_at": "2026-09-24T10:02:40.500944139Z"
+}
