@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.tgz
+.env
+*.wasm
+.cre_build_tmp.js
+binary.wasm
+*.br.b64
+*.orig

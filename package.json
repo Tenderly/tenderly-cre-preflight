@@ -1,0 +1,54 @@
+{
+  "name": "@tenderly/cre-sdk",
+  "version": "0.1.0",
+  "description": "Send a transaction on a Tenderly Virtual Environment from inside a Chainlink CRE workflow.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Tenderly/tenderly-cre-sdk.git"
+  },
+  "homepage": "https://github.com/Tenderly/tenderly-cre-sdk#readme",
+  "bugs": {
+    "url": "https://github.com/Tenderly/tenderly-cre-sdk/issues"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit -p tsconfig.test.json",
+    "test": "bun test",
+    "prepublishOnly": "bun run typecheck && bun test && bun run build",
+    "prepare": "bun run build"
+  },
+  "keywords": [
+    "tenderly",
+    "chainlink",
+    "cre",
+    "virtual-environment",
+    "simulation",
+    "evm"
+  ],
+  "peerDependencies": {
+    "@chainlink/cre-sdk": ">=1.22.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@chainlink/cre-sdk": "1.22.0",
+    "@types/bun": "1.2.21",
+    "typescript": "5.9.3",
+    "zod": "3.25.76"
+  }
+}
