@@ -1,10 +1,17 @@
 import { describe, expect } from 'bun:test'
 import { test as creTest } from '@chainlink/cre-sdk/test'
-import { TenderlyVNet, buildStateOverrides, fundSchema, type TenderlyConfig } from '../src/index.js'
+import {
+  TenderlyPreflight,
+  buildStateOverrides,
+  fundSchema,
+  stateOverridesSchema,
+  type TenderlyConfig,
+} from '../src/index.js'
 import {
   environmentResponse,
   jsonBody,
   mockHttp,
+  rpcError,
   rpcResult,
   runtimeWithSecret,
   type RecordedCall,
@@ -49,8 +56,8 @@ const dispatcher = () => (call: RecordedCall) => {
   return { statusCode: 500, body: '' }
 }
 
-const run = (options: Parameters<TenderlyVNet['sendTransaction']>[2], config: TenderlyConfig = base) =>
-  new TenderlyVNet(config).sendTransaction(runtimeWithSecret(KEY_SECRET, 'access-key'), tx, options)
+const run = (options: Parameters<TenderlyPreflight['sendTransaction']>[2], config: TenderlyConfig = base) =>
+  new TenderlyPreflight(config).sendTransaction(runtimeWithSecret(KEY_SECRET, 'access-key'), tx, options)
 
 const sendParams = (calls: RecordedCall[]) =>
   calls.find((c) => c.body?.method === 'tenderly_sendTransaction')?.body?.params as unknown[]
@@ -147,6 +154,49 @@ describe('buildStateOverrides', () => {
 
   creTest('is undefined when there is nothing to say', () => {
     expect(buildStateOverrides([], undefined)).toBeUndefined()
+  })
+
+  creTest('merges storage slots from two spellings of the same address', () => {
+    const checksummed = ALICE.replace(/a/g, 'A')
+    const overrides = stateOverridesSchema.parse({
+      [ALICE]: { stateDiff: { '0x1': 1n } },
+      [checksummed]: { balance: 5n, stateDiff: { '0x2': 2n } },
+    })
+    const word = (n: number) => `0x${n.toString(16).padStart(64, '0')}`
+    expect(buildStateOverrides([], overrides)).toEqual({
+      [ALICE]: { balance: '0x5', stateDiff: { [word(1)]: word(1), [word(2)]: word(2) } },
+    })
+  })
+})
+
+describe('256-bit bounds', () => {
+  creTest('accepts the largest word and rejects anything wider', () => {
+    const max = 2n ** 256n - 1n
+    expect(stateOverridesSchema.safeParse({ [ALICE]: { stateDiff: { [SLOT]: max } } }).success).toBeTrue()
+    expect(stateOverridesSchema.safeParse({ [ALICE]: { stateDiff: { [SLOT]: max + 1n } } }).success).toBeFalse()
+    expect(stateOverridesSchema.safeParse({ [ALICE]: { balance: max + 1n } }).success).toBeFalse()
+    expect(fundSchema.safeParse([{ addresses: [ALICE], balance: max + 1n }]).success).toBeFalse()
+  })
+})
+
+describe('erc20 funding failures', () => {
+  const fundingAnswers = (answer: () => { statusCode: number; body?: string }) =>
+    mockHttp((call) =>
+      call.body?.method === 'tenderly_setErc20Balance' ? answer() : dispatcher()(call),
+    )
+  const fundDai = () => run({ fund: [{ token: DAI, holders: [ALICE], balance: 1n }] })
+
+  creTest('a refusal fails every run the same way, so it is misconfigured', () => {
+    // Not a token, or a token whose balance slot Tenderly cannot find.
+    fundingAnswers(() => rpcError('could not find balance slot', undefined, -32000))
+    const verdict = fundDai()
+    expect(verdict.outcome).toBe('misconfigured')
+    expect(verdict.reason).toContain('could not find balance slot')
+  })
+
+  creTest('a node that could not answer is unavailable', () => {
+    fundingAnswers(() => rpcError('internal error', undefined, -32603))
+    expect(fundDai().outcome).toBe('unavailable')
   })
 })
 

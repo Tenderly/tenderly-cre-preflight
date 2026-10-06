@@ -36,6 +36,16 @@ export const rpcError = (message: string, data?: string, code = 3) => ({
   body: jsonBody({ jsonrpc: '2.0', id: 1, error: { code, message, ...(data ? { data } : {}) } }),
 })
 
+/** ABI-encoded `Error(string)` revert data, as a node returns it. */
+export const errorString = (reason: string): string => {
+  const bytes = new TextEncoder().encode(reason)
+  const hex = [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('')
+  const offset = '0'.repeat(62) + '20'
+  const length = bytes.length.toString(16).padStart(64, '0')
+  const padded = hex.padEnd(Math.ceil(bytes.length / 32) * 64, '0')
+  return `0x08c379a0${offset}${length}${padded}`
+}
+
 export const ADMIN_RPC = 'https://virtual.sepolia.eu.rpc.tenderly.co/tenderly/acct/proj/abc-def'
 
 /** Mirrors the real shape of POST /environments, captured from the live API. */

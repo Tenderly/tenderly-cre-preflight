@@ -1,9 +1,10 @@
 import { describe, expect } from 'bun:test'
 import { test as creTest } from '@chainlink/cre-sdk/test'
-import { TenderlyVNet, type TenderlyConfig } from '../src/index.js'
+import { TenderlyPreflight, type TenderlyConfig } from '../src/index.js'
 import {
   ADMIN_RPC,
   environmentResponse,
+  errorString,
   jsonBody,
   mockHttp,
   rpcError,
@@ -36,14 +37,6 @@ const receipt = (status: string) => ({
   blockNumber: BLOCK,
 })
 
-const errorString = (reason: string): string => {
-  const bytes = new TextEncoder().encode(reason)
-  const hex = [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('')
-  return `0x08c379a0${'0'.repeat(62)}20${bytes.length.toString(16).padStart(64, '0')}${hex.padEnd(
-    Math.ceil(bytes.length / 32) * 64,
-    '0',
-  )}`
-}
 
 const dispatcher =
   (overrides: Record<string, unknown> = {}) =>
@@ -57,7 +50,6 @@ const dispatcher =
       const value = overrides[method]
       return value instanceof Error ? rpcError(value.message, undefined, 3) : rpcResult(value)
     }
-    if (method === 'tenderly_setBalance') return rpcResult('0x00')
     if (method === 'tenderly_sendTransaction') return rpcResult(TX_HASH)
     if (method === 'eth_getTransactionReceipt') return rpcResult(receipt('0x1'))
     if (method === 'eth_call') return rpcResult('0x')
@@ -65,7 +57,7 @@ const dispatcher =
   }
 
 const run = (config: TenderlyConfig = base, transaction = tx) =>
-  new TenderlyVNet(config).sendTransaction(runtimeWithSecret(KEY_SECRET, 'access-key'), transaction)
+  new TenderlyPreflight(config).sendTransaction(runtimeWithSecret(KEY_SECRET, 'access-key'), transaction)
 
 describe('happy path', () => {
   creTest('creates, submits, reads the receipt, and deletes', () => {
@@ -88,11 +80,16 @@ describe('happy path', () => {
 })
 
 describe('the API host is not configurable', () => {
-  creTest('always talks to api.tenderly.co, whatever the config says', () => {
+  creTest('refuses a config that tries to set a host', () => {
     // The access key travels in an X-Access-Key header. With no host in config
-    // there is nowhere else it could be sent, which is the point.
+    // there is nowhere else it could be sent, and an attempt to set one is an
+    // error rather than something silently ignored.
+    expect(() => new TenderlyPreflight({ ...base, apiBaseUrl: 'https://evil.example.com' } as never)).toThrow()
+  })
+
+  creTest('always talks to api.tenderly.co', () => {
     const calls = mockHttp(dispatcher())
-    run({ ...base, apiBaseUrl: 'https://evil.example.com' } as never)
+    run()
 
     const api = calls.filter((c) => !c.url.includes('rpc.tenderly.co'))
     expect(api.length).toBeGreaterThan(0)
@@ -271,22 +268,203 @@ describe('failure handling', () => {
     expect(run().outcome).toBe('unavailable')
   })
 
-  creTest('fails loudly when the secret is not configured', () => {
+  creTest('reports a missing secret as misconfigured, before any HTTP action', () => {
     // A missing secret is a deployment error, not a transient condition, so it
-    // throws rather than degrading to `unavailable`. It throws in DON mode,
-    // before any HTTP action is spent.
+    // is `misconfigured` rather than `unavailable`. It is decided in DON mode,
+    // so no environment is created and no HTTP action is spent.
     const calls = mockHttp(dispatcher())
-    expect(() =>
-      new TenderlyVNet(base).sendTransaction(runtimeWithSecret('someothersecret', 'k'), tx),
-    ).toThrow(/secret retrieval failed/)
+    const verdict = new TenderlyPreflight(base).sendTransaction(
+      runtimeWithSecret('someothersecret', 'k'),
+      tx,
+    )
+    expect(verdict.outcome).toBe('misconfigured')
+    expect(verdict.reason).toContain(KEY_SECRET)
     expect(calls).toHaveLength(0)
   })
 
-  creTest('fails loudly when the secret is configured but empty', () => {
+  creTest('reports an empty secret as misconfigured too', () => {
     const calls = mockHttp(dispatcher())
-    expect(() =>
-      new TenderlyVNet(base).sendTransaction(runtimeWithSecret(KEY_SECRET, ''), tx),
-    ).toThrow(/missing or empty/)
+    const verdict = new TenderlyPreflight(base).sendTransaction(runtimeWithSecret(KEY_SECRET, ''), tx)
+    expect(verdict.outcome).toBe('misconfigured')
     expect(calls).toHaveLength(0)
+  })
+})
+
+/** A dispatcher that lets one JSON-RPC method answer however the test needs. */
+const answering =
+  (method: string, answer: (call: RecordedCall) => { statusCode: number; body?: string }) =>
+  (call: RecordedCall) =>
+    call.body?.method === method ? answer(call) : dispatcher()(call)
+
+describe('cleanup of environments that exist', () => {
+  creTest('deletes an environment whose creation response fails validation', () => {
+    // Tenderly created the environment; we refused the rest of its response.
+    // The id is all cleanup needs, so the environment must still be deleted.
+    const calls = mockHttp((call) => {
+      if (call.method === 'POST' && call.url.endsWith('/environments')) {
+        const body = environmentResponse()
+        body.active_instance.vnets[0]!.rpcs = [{ url: ADMIN_RPC, name: 'Admin RPC (HTTP)' }]
+        return { statusCode: 200, body: jsonBody(body) }
+      }
+      return dispatcher()(call)
+    })
+
+    expect(run().outcome).toBe('unavailable')
+    expect(calls.map((c) => c.method)).toEqual(['POST', 'DELETE'])
+    expect(calls[1]?.url.endsWith('/environments/env-id-1')).toBeTrue()
+  })
+
+  creTest('a lowered maxResponseBytes does not apply to the creation response', () => {
+    // The real creation body is a few KB. Holding it to a lower limit would
+    // leave an environment that exists but whose id we refused to read.
+    const calls = mockHttp(dispatcher())
+    expect(run({ ...base, maxResponseBytes: 100 }).outcome).toBe('oversized')
+    expect(calls.at(-1)?.method).toBe('DELETE')
+  })
+})
+
+describe('classifying a refused send', () => {
+  const sendError = (code: number, message: string) =>
+    mockHttp(answering('tenderly_sendTransaction', () => rpcError(message, undefined, code)))
+
+  creTest('a transaction-level refusal is `rejected`', () => {
+    sendError(-32000, 'insufficient funds for gas * price + value')
+    const verdict = run()
+    expect(verdict.outcome).toBe('rejected')
+    expect(verdict.reason).toBe('insufficient funds for gas * price + value')
+  })
+
+  creTest('a method the node does not know is `misconfigured`, not `rejected`', () => {
+    sendError(-32601, 'the method tenderly_sendTransaction does not exist')
+    expect(run().outcome).toBe('misconfigured')
+  })
+
+  creTest('invalid params are `misconfigured`, not `rejected`', () => {
+    sendError(-32602, 'invalid argument 1: hex string has length 66, want 64')
+    expect(run().outcome).toBe('misconfigured')
+  })
+
+  creTest('an internal node error is `unavailable`, not `rejected`', () => {
+    sendError(-32603, 'internal error')
+    expect(run().outcome).toBe('unavailable')
+  })
+})
+
+describe('retryable creation statuses', () => {
+  for (const status of [408, 425, 429]) {
+    creTest(`HTTP ${status} is \`unavailable\`, not \`misconfigured\``, () => {
+      // A DON creating one environment per node at once is exactly the burst
+      // that gets rate limited. Telling the operator to fix config is wrong.
+      mockHttp((call) =>
+        call.method === 'POST' && call.url.endsWith('/environments')
+          ? { statusCode: status, body: jsonBody({ error: { message: 'rate limit exceeded' } }) }
+          : dispatcher()(call),
+      )
+      expect(run().outcome).toBe('unavailable')
+    })
+  }
+})
+
+describe('revert explanation is best effort', () => {
+  const revertedWithReplay = (replay: (call: RecordedCall) => { statusCode: number; body?: string }) =>
+    mockHttp((call) =>
+      call.body?.method === 'eth_call'
+        ? replay(call)
+        : dispatcher({ eth_getTransactionReceipt: receipt('0x0') })(call),
+    )
+
+  creTest('a replay that cannot be sent keeps the proven revert', () => {
+    revertedWithReplay(() => {
+      throw new Error('connection refused')
+    })
+    const verdict = run()
+    expect(verdict.outcome).toBe('reverted')
+    expect(verdict.reverted).toBeTrue()
+    expect(verdict.reason).toBe('')
+  })
+
+  creTest('an oversized replay keeps the proven revert', () => {
+    revertedWithReplay(() => {
+      throw new Error('response buffer too small')
+    })
+    expect(run().outcome).toBe('reverted')
+  })
+
+  creTest('replays with the state overrides the transaction was sent with', () => {
+    // A stubbed contract or a funded sender is part of the state the
+    // transaction faced. Replaying without them explains a different call.
+    const calls = revertedWithReplay(() => rpcError('execution reverted', errorString('stubbed')))
+    const verdict = new TenderlyPreflight(base).sendTransaction(
+      runtimeWithSecret(KEY_SECRET, 'access-key'),
+      tx,
+      {
+        fund: [{ addresses: [FROM], balance: 10n ** 18n }],
+        stateOverrides: { [TO]: { code: '0x6080' } },
+      },
+    )
+    expect(verdict.reason).toBe('stubbed')
+
+    const params = (method: string) =>
+      calls.find((c) => c.body?.method === method)?.body?.params as unknown[]
+    expect(params('eth_call')[2]).toEqual(params('tenderly_sendTransaction')[1])
+    expect(params('eth_call')[2]).toEqual({
+      [FROM]: { balance: '0xde0b6b3a7640000' },
+      [TO]: { code: '0x6080' },
+    })
+  })
+})
+
+describe('credentials stay out of the log', () => {
+  creTest('an oversized response is logged without the Admin RPC URL', () => {
+    mockHttp(
+      answering('eth_getTransactionReceipt', () =>
+        rpcResult({ ...receipt('0x1'), logs: ['x'.repeat(300_000)] }),
+      ),
+    )
+    const runtime = runtimeWithSecret(KEY_SECRET, 'access-key')
+    expect(new TenderlyPreflight(base).sendTransaction(runtime, tx).outcome).toBe('oversized')
+
+    const logs = runtime.getLogs().join('\n')
+    expect(logs).toContain('eth_getTransactionReceipt response was')
+    expect(logs).not.toContain(ADMIN_RPC)
+  })
+
+  creTest('an error message that echoes the URL or the key is scrubbed', () => {
+    // Error text comes from the node and is not ours to trust. It reaches both
+    // the log and the verdict's `reason`, so both must be scrubbed.
+    mockHttp(
+      answering('tenderly_sendTransaction', () =>
+        rpcError(`nonce too low for ${ADMIN_RPC} (key access-key)`, undefined, -32000),
+      ),
+    )
+    const runtime = runtimeWithSecret(KEY_SECRET, 'access-key')
+    const verdict = new TenderlyPreflight(base).sendTransaction(runtime, tx)
+    expect(verdict.outcome).toBe('rejected')
+    expect(verdict.reason).toBe('nonce too low for <redacted> (key <redacted>)')
+
+    const logs = runtime.getLogs().join('\n')
+    expect(logs).toContain('nonce too low')
+    expect(logs).not.toContain(ADMIN_RPC)
+    expect(logs).not.toContain('access-key')
+  })
+})
+
+describe('receipt parsing', () => {
+  creTest('a receipt with no status is `unavailable`, not `reverted`', () => {
+    // Only an explicit failure proves a revert. A missing status proves nothing.
+    mockHttp(
+      answering('eth_getTransactionReceipt', () => rpcResult({ ...receipt('0x1'), status: null })),
+    )
+    expect(run().outcome).toBe('unavailable')
+  })
+
+  creTest('a zero-padded status is still read as success', () => {
+    mockHttp(dispatcher({ eth_getTransactionReceipt: receipt('0x01') }))
+    expect(run().outcome).toBe('success')
+  })
+
+  creTest('a decimal gasUsed is read rather than reported as zero', () => {
+    mockHttp(dispatcher({ eth_getTransactionReceipt: { ...receipt('0x1'), gasUsed: '21000' } }))
+    expect(run().gasUsed).toBe(21000n)
   })
 })

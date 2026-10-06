@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import { test as creTest } from '@chainlink/cre-sdk/test'
-import { TenderlyVNet, VERDICT_FIELDS } from '../src/index.js'
+import { SDK_PB } from '@chainlink/cre-sdk/pb'
+import { TenderlyPreflight, VERDICT_FIELDS, indeterminateVerdict, verdictConsensus } from '../src/index.js'
 import { environmentResponse, jsonBody, mockHttp, rpcResult, runtimeWithSecret } from './helpers.js'
 
 const TX_HASH = `0x${'ab'.repeat(32)}`
@@ -39,7 +40,7 @@ describe('verdict shape', () => {
       })
     })
 
-    const verdict = new TenderlyVNet({
+    const verdict = new TenderlyPreflight({
       accountSlug: 'acct',
       projectSlug: 'proj',
       accessKeySecretId: 'tenderlyaccesskey',
@@ -53,5 +54,35 @@ describe('verdict shape', () => {
     for (const field of VERDICT_FIELDS) {
       expect(verdict[field]).toBeDefined()
     }
+  })
+})
+
+/**
+ * The test runtime echoes a single node's observation, so it cannot show what
+ * the DON does with disagreeing nodes. What it can pin down is the contract we
+ * hand the host: which fields must reach a quorum of identical values, which
+ * one may differ, and what comes back when consensus fails.
+ */
+describe('consensus contract', () => {
+  const { AggregationType } = SDK_PB
+  const fieldAggregation = (field: string) => {
+    const descriptor = verdictConsensus.descriptor.descriptor
+    if (descriptor.case !== 'fieldsMap') throw new Error('expected a per-field descriptor')
+    const entry = descriptor.value.fields[field]?.descriptor
+    return entry?.case === 'aggregation' ? entry.value : undefined
+  }
+
+  it('requires identical values for every field that decides whether to write', () => {
+    for (const field of ['outcome', 'reverted', 'reason']) {
+      expect(fieldAggregation(field)).toBe(AggregationType.IDENTICAL)
+    }
+  })
+
+  it('takes the median gas, since block timestamps differ per node', () => {
+    expect(fieldAggregation('gasUsed')).toBe(AggregationType.MEDIAN)
+  })
+
+  it('falls back to indeterminate when the nodes cannot agree', () => {
+    expect(verdictConsensus.defaultValue).toEqual(indeterminateVerdict)
   })
 })

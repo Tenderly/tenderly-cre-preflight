@@ -1,7 +1,15 @@
 import { describe, expect } from 'bun:test'
 import { test as creTest } from '@chainlink/cre-sdk/test'
-import { TenderlyVNet, VERDICT_FIELDS, type TenderlyConfig } from '../src/index.js'
-import { environmentResponse, jsonBody, mockHttp, rpcError, rpcResult, runtimeWithSecret } from './helpers.js'
+import { TenderlyPreflight, VERDICT_FIELDS, type TenderlyConfig } from '../src/index.js'
+import {
+  environmentResponse,
+  errorString,
+  jsonBody,
+  mockHttp,
+  rpcError,
+  rpcResult,
+  runtimeWithSecret,
+} from './helpers.js'
 
 const KEY = 'tenderlyaccesskey'
 const TX = `0x${'ab'.repeat(32)}`
@@ -15,12 +23,6 @@ const base = {
   fork: { networkId: '11155111', at: '6000000' },
 }
 
-const errorString = (reason: string): string => {
-  const b = new TextEncoder().encode(reason)
-  const hex = [...b].map((x) => x.toString(16).padStart(2, '0')).join('')
-  return `0x08c379a0${'0'.repeat(62)}20${b.length.toString(16).padStart(64, '0')}${hex.padEnd(
-    Math.ceil(b.length / 32) * 64, '0')}`
-}
 
 const run = (cfg: TenderlyConfig, status = '0x1') => {
   const calls = mockHttp((call) => {
@@ -31,7 +33,7 @@ const run = (cfg: TenderlyConfig, status = '0x1') => {
     if (m === 'eth_call') return rpcError('execution reverted', errorString('ERC20: bad'))
     return rpcResult({ transactionHash: TX, from: FROM, to: TO, status, gasUsed: '0x5208', blockNumber: '0x5b8d81' })
   })
-  const v = new TenderlyVNet(cfg).sendTransaction(runtimeWithSecret(KEY, 'k'), { from: FROM, to: TO })
+  const v = new TenderlyPreflight(cfg).sendTransaction(runtimeWithSecret(KEY, 'k'), { from: FROM, to: TO })
   return { verdict: v, calls }
 }
 
@@ -71,8 +73,8 @@ describe('optional verdict fields', () => {
 
   creTest('turning gas off does not change the HTTP budget', () => {
     // It comes from the receipt this flow already reads, so it is free either way.
-    expect(new TenderlyVNet(base).httpActionCost).toBe(5)
-    expect(new TenderlyVNet({ ...base, includeGasUsed: false }).httpActionCost).toBe(5)
-    expect(new TenderlyVNet({ ...base, explainReverts: false }).httpActionCost).toBe(4)
+    expect(new TenderlyPreflight(base).httpActionCost).toBe(5)
+    expect(new TenderlyPreflight({ ...base, includeGasUsed: false }).httpActionCost).toBe(5)
+    expect(new TenderlyPreflight({ ...base, explainReverts: false }).httpActionCost).toBe(4)
   })
 })

@@ -1,5 +1,5 @@
 import type { NodeRuntime } from '@chainlink/cre-sdk'
-import { isSuccess, sendJson, type CacheOptions } from './http.js'
+import { isSuccess, sendJson } from './http.js'
 
 export interface RpcError {
   code: number
@@ -27,6 +27,30 @@ export type RpcOutcome =
   | { ok: true; result: unknown }
   | { ok: false; error: RpcError }
 
+/**
+ * What a JSON-RPC error says about the request, as opposed to the transaction.
+ *
+ * - `transient`: the node could not serve the request right now (internal
+ *   error, resource unavailable, rate limited). Retrying can help.
+ * - `malformed`: the request itself can never succeed as written (parse error,
+ *   unknown method, invalid params). Retrying cannot help.
+ * - `refused`: the node understood the request and turned it down on its merits,
+ *   e.g. insufficient funds or a nonce conflict. That is an answer.
+ *
+ * Codes from JSON-RPC 2.0 and EIP-1474. Anything not listed is `refused`, which
+ * is where geth and Tenderly put transaction-level rejections (-32000, -32003).
+ */
+export type RpcErrorClass = 'transient' | 'malformed' | 'refused'
+
+const TRANSIENT_CODES = new Set([-32603, -32002, -32005])
+const MALFORMED_CODES = new Set([-32700, -32600, -32601, -32602, -32004, -32006])
+
+export const classifyRpcError = (error: RpcError): RpcErrorClass => {
+  if (error.kind === 'transport' || TRANSIENT_CODES.has(error.code)) return 'transient'
+  if (MALFORMED_CODES.has(error.code)) return 'malformed'
+  return 'refused'
+}
+
 const asRecord = (value: unknown): Record<string, unknown> | null =>
   value !== null && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -37,17 +61,14 @@ export const jsonRpc = (
   url: string,
   method: string,
   params: unknown[],
-  cache: CacheOptions,
   maxResponseBytes?: number,
 ): RpcOutcome => {
   const response = sendJson(runtime, {
     method: 'POST',
     url,
+    label: method,
     headers: { 'content-type': 'application/json', accept: 'application/json' },
-    // `id` is fixed so that every node builds a byte-identical request, which
-    // is what makes the shared response cache able to match them.
     body: { jsonrpc: '2.0', id: 1, method, params },
-    cache,
     maxResponseBytes,
   })
 

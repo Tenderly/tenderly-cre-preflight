@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check (@chainlink/cre-sdk ${{ matrix.cre-sdk }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # `pinned` is the lowest supported version, the one in bun.lock.
+        # `latest` catches a new SDK release breaking us before a user does.
+        cre-sdk: [pinned, latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          # Older Bun produces WASM that traps at handler registration.
+          bun-version: 1.4.2
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - run: bun install --frozen-lockfile
+      - if: matrix.cre-sdk == 'latest'
+        run: bun add --no-save --dev @chainlink/cre-sdk@latest
+      - run: bun run typecheck
+      - run: bun test
+      - run: bun run build
+      - name: Compile the example workflow to WASM against the packed library
+        run: bun run compile:example
+        env:
+          CRE_SDK_VERSION: ${{ matrix.cre-sdk == 'latest' && 'latest' || '' }}

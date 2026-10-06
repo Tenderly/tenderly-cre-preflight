@@ -1,14 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import { decodeRevertReason, isRevertError } from '../src/index.js'
+import { errorString } from './helpers.js'
 
-const errorString = (reason: string): string => {
-  const bytes = new TextEncoder().encode(reason)
-  const hex = [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('')
-  const offset = '0'.repeat(62) + '20'
-  const length = bytes.length.toString(16).padStart(64, '0')
-  const padded = hex.padEnd(Math.ceil(bytes.length / 32) * 64, '0')
-  return `0x08c379a0${offset}${length}${padded}`
-}
 
 describe('decodeRevertReason', () => {
   it('decodes Error(string)', () => {
@@ -30,6 +23,17 @@ describe('decodeRevertReason', () => {
   it('decodes an arithmetic panic', () => {
     const panic = `0x4e487b71${'0'.repeat(62)}11`
     expect(decodeRevertReason(panic)).toBe('panic: arithmetic overflow or underflow (0x11)')
+  })
+
+  it('reads the whole panic code, not just its last byte', () => {
+    // Panic(0x101) is not an assertion failure, whatever its last byte says.
+    expect(decodeRevertReason(`0x4e487b71${(0x101).toString(16).padStart(64, '0')}`)).toBe(
+      'panic: 0x101',
+    )
+  })
+
+  it('decodes nothing from a truncated panic', () => {
+    expect(decodeRevertReason('0x4e487b710000000000000000000000000000000000000000000000000000000000')).toBe('')
   })
 
   it('reports a custom error by selector', () => {

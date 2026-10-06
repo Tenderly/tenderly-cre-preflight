@@ -58,8 +58,12 @@ export const decodeRevertReason = (data: string | undefined): string => {
   }
 
   if (selector === PANIC_SELECTOR) {
-    const bytes = hexToBytes(data.slice(10))
-    const code = (bytes[31] ?? 0).toString(16).padStart(2, '0')
+    // The code is a full uint256. Reading only its last byte would report
+    // Panic(0x101) as an assertion failure, so read the whole word, and decode
+    // nothing from a payload too short to hold one.
+    const word = data.slice(10, 74)
+    if (word.length < 64) return ''
+    const code = BigInt(`0x${word}`).toString(16).padStart(2, '0')
     const reason = PANIC_REASONS[code]
     return reason ? `panic: ${reason} (0x${code})` : `panic: 0x${code}`
   }

@@ -1,5 +1,6 @@
 import type { NodeRuntime } from '@chainlink/cre-sdk'
 import { isSuccess, sendJson } from './http.js'
+import { toHexQuantity } from './hex.js'
 import { asRecord } from './rpc.js'
 import type { ResolvedTenderlyConfig } from './config.js'
 
@@ -7,9 +8,16 @@ import type { ResolvedTenderlyConfig } from './config.js'
 const TENDERLY_HOST = /^https:\/\/(?:[a-z0-9-]+\.)+tenderly\.co(?:[/?#]|$)/i
 
 /**
+ * 4xx statuses that describe the moment rather than the request: a timeout, a
+ * request sent too early, and rate limiting. A DON creating one environment per
+ * node at the same instant is exactly the burst that gets a 429.
+ */
+const RETRYABLE_CLIENT_STATUSES = new Set([408, 425, 429])
+
+/**
  * Tenderly answered, and refused. Carries the status so the caller can tell a
- * request that will never work (4xx: unsupported network, missing project,
- * unauthorised key) from Tenderly being temporarily unwell (5xx).
+ * request that will never work (unsupported network, missing project,
+ * unauthorised key) from one that may work on the next run (5xx, rate limits).
  */
 export class EnvironmentRequestError extends Error {
   constructor(
@@ -20,9 +28,13 @@ export class EnvironmentRequestError extends Error {
     this.name = 'EnvironmentRequestError'
   }
 
-  /** A 4xx is permanent: the config or the secret has to change. */
+  /** Permanent: the config or the secret has to change before this can work. */
   get isPermanent(): boolean {
-    return this.statusCode >= 400 && this.statusCode < 500
+    return (
+      this.statusCode >= 400 &&
+      this.statusCode < 500 &&
+      !RETRYABLE_CLIENT_STATUSES.has(this.statusCode)
+    )
   }
 }
 
@@ -120,16 +132,43 @@ export const parseCreatedEnvironment = (body: string): CreatedEnvironment => {
   return { environmentId, adminRpcUrl, chainId }
 }
 
-/** One HTTP action. */
+/**
+ * The environment id alone, read as leniently as possible.
+ *
+ * Once Tenderly has created an environment, the only thing that matters for
+ * cleanup is its id. Reading it separately from the full validation means a
+ * response that fails any other check still gets its environment deleted.
+ */
+export const readEnvironmentId = (body: string): string | null => {
+  try {
+    const id = asRecord(JSON.parse(body))?.id
+    return typeof id === 'string' && id ? id : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * One HTTP action.
+ *
+ * `onCreated` is called with the environment id as soon as Tenderly reports
+ * one, before the rest of the response is validated, so the caller can always
+ * clean up an environment that exists even when this throws.
+ *
+ * The response is held to the platform quota rather than `maxResponseBytes`.
+ * The creation body is small and fixed in shape, and lowering the limit below
+ * it would leave an environment that exists but whose id we refused to read.
+ */
 export const createEnvironment = (
   runtime: NodeRuntime<unknown>,
   config: ResolvedTenderlyConfig,
   accessKey: string,
   forkBlockNumber: bigint,
+  onCreated: (environmentId: string) => void,
 ): CreatedEnvironment => {
   const networkConfig: Record<string, unknown> = {
     network_id: config.fork.networkId,
-    block_number: `0x${forkBlockNumber.toString(16)}`,
+    block_number: toHexQuantity(forkBlockNumber),
     chain_config_overrides: { chain_id: config.fork.networkId },
   }
   if (config.region) networkConfig.region = config.region
@@ -137,11 +176,9 @@ export const createEnvironment = (
   const response = sendJson(runtime, {
     method: 'POST',
     url: `${apiBase(config)}/environments`,
+    label: 'environment creation',
     headers: apiHeaders(accessKey),
     body: { display_name: config.displayName, network_configs: [networkConfig] },
-    // Each node needs its own environment, so responses are never shared.
-    cache: { store: false },
-    maxResponseBytes: config.maxResponseBytes,
   })
 
   if (!isSuccess(response.statusCode)) {
@@ -151,6 +188,9 @@ export const createEnvironment = (
       detail || `environment creation returned HTTP ${response.statusCode}`,
     )
   }
+
+  const environmentId = readEnvironmentId(response.body)
+  if (environmentId) onCreated(environmentId)
   return parseCreatedEnvironment(response.body)
 }
 
@@ -164,10 +204,9 @@ export const deleteEnvironment = (
   try {
     const response = sendJson(runtime, {
       method: 'DELETE',
-      url: `${apiBase(config)}/environments/${environmentId}`,
+      url: `${apiBase(config)}/environments/${encodeURIComponent(environmentId)}`,
+      label: 'environment deletion',
       headers: apiHeaders(accessKey),
-      cache: { store: false },
-      maxResponseBytes: config.maxResponseBytes,
     })
     if (!isSuccess(response.statusCode)) {
       runtime.log(`tenderly: cleanup of ${environmentId} returned HTTP ${response.statusCode}`)
