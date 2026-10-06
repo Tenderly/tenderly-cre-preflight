@@ -340,7 +340,7 @@ one with your change:
 bun run changeset
 ```
 
-When it lands on `master`, the release workflow opens a "Release" pull request
+When it lands on `main`, the release workflow opens a "Release" pull request
 that bumps the version and the changelog. Merging that pull request publishes
 to npm with provenance.
 
