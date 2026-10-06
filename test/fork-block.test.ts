@@ -1,7 +1,7 @@
 import { describe, expect } from 'bun:test'
 import { bigintToProtoBigInt, getNetwork } from '@chainlink/cre-sdk'
 import { EvmMock, test as creTest } from '@chainlink/cre-sdk/test'
-import { TenderlyVNet, resolveForkBlock, tenderlyConfigSchema } from '../src/index.js'
+import { TenderlyPreflight, resolveForkBlock, tenderlyConfigSchema } from '../src/index.js'
 import { environmentResponse, jsonBody, mockHttp, rpcResult, runtimeWithSecret } from './helpers.js'
 
 const CHAIN = 'ethereum-testnet-sepolia'
@@ -126,7 +126,7 @@ describe('sendTransaction fork selection', () => {
     const seen: { forkBlock?: string } = {}
     mockHttp(dispatch(seen))
 
-    new TenderlyVNet({
+    new TenderlyPreflight({
       accountSlug: 'acct',
       projectSlug: 'proj',
       accessKeySecretId: 'tenderlyaccesskey',
@@ -141,7 +141,7 @@ describe('sendTransaction fork selection', () => {
     const seen: { forkBlock?: string } = {}
     mockHttp(dispatch(seen))
 
-    new TenderlyVNet({
+    new TenderlyPreflight({
       accountSlug: 'acct',
       projectSlug: 'proj',
       accessKeySecretId: 'tenderlyaccesskey',
@@ -155,5 +155,69 @@ describe('sendTransaction fork selection', () => {
 
     expect(seen.forkBlock).toBe(`0x${(5_000_000n).toString(16)}`)
     expect(headerCalls).toHaveLength(0)
+  })
+})
+
+describe('fork block failures come back as verdicts', () => {
+  const config = {
+    accountSlug: 'acct',
+    projectSlug: 'proj',
+    accessKeySecretId: 'tenderlyaccesskey',
+    fork: { networkId: '11155111', at: 'latest' as const },
+  }
+
+  creTest('a chain read that fails is `unavailable`, and nothing is created', () => {
+    const evm = EvmMock.testInstance(SELECTOR)
+    evm.headerByNumber = () => {
+      throw new Error('chain read failed')
+    }
+    const calls = mockHttp(() => ({ statusCode: 500 }))
+
+    const verdict = new TenderlyPreflight(config).sendTransaction(
+      runtimeWithSecret('tenderlyaccesskey', 'key'),
+      { from: FROM, to: TO },
+    )
+    expect(verdict.outcome).toBe('unavailable')
+    expect(calls).toHaveLength(0)
+  })
+
+  creTest('a reply with no header is `unavailable` too', () => {
+    const evm = EvmMock.testInstance(SELECTOR)
+    evm.headerByNumber = () => ({})
+    mockHttp(() => ({ statusCode: 500 }))
+
+    const verdict = new TenderlyPreflight(config).sendTransaction(
+      runtimeWithSecret('tenderlyaccesskey', 'key'),
+      { from: FROM, to: TO },
+    )
+    expect(verdict.outcome).toBe('unavailable')
+  })
+})
+
+describe('explicit fork block validation', () => {
+  const send = (forkBlockNumber: unknown) => () =>
+    new TenderlyPreflight({
+      accountSlug: 'acct',
+      projectSlug: 'proj',
+      accessKeySecretId: 'tenderlyaccesskey',
+      fork: { networkId: '11155111', at: 'latest' },
+    }).sendTransaction(
+      runtimeWithSecret('tenderlyaccesskey', 'key'),
+      { from: FROM, to: TO },
+      { forkBlockNumber: forkBlockNumber as bigint },
+    )
+
+  creTest('rejects zero and negative blocks', () => {
+    expect(send(0n)).toThrow()
+    expect(send(-5n)).toThrow()
+  })
+
+  creTest('rejects a decimal string rather than reading its digits as hex', () => {
+    // `'6000000'.toString(16)` ignores the radix, which would fork block 0x6000000.
+    expect(send('6000000')).toThrow()
+  })
+
+  creTest('rejects a protobuf BigInt: convert it with protoBigIntToBigint first', () => {
+    expect(send(bigintToProtoBigInt(5_000_000n))).toThrow()
   })
 })

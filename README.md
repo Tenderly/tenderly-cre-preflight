@@ -1,4 +1,4 @@
-# @tenderly/cre-sdk
+# @tenderly/cre-preflight
 
 Simulate an EVM transaction on a [Tenderly Virtual Environment](https://docs.tenderly.co/virtual-environments)
 from inside a [Chainlink CRE](https://docs.chain.link/cre) workflow, and get a
@@ -22,11 +22,15 @@ if (verdict.outcome !== 'success') {
 ## Install
 
 ```bash
-bun add @tenderly/cre-sdk
+bun add @tenderly/cre-preflight
 ```
 
-`@chainlink/cre-sdk` (1.22 or newer) and `zod` are peer dependencies. Your
-workflow already depends on both.
+`@chainlink/cre-sdk` (1.22 or newer, below 2.0) and `zod` 3 are peer
+dependencies. Your workflow already has both: `@chainlink/cre-sdk` depends on
+zod 3 itself. The schemas this package exports (`tenderlyConfigSchema`,
+`transactionSchema`, ...) are zod 3 schemas, so if your own config schema is
+written in zod 4, validate this package's slice of it separately rather than
+nesting one inside the other.
 
 You also need **Bun 1.4 or newer**. Older versions silently produce a WASM binary
 that traps at handler registration with `wasm trap: unreachable` and no useful
@@ -36,9 +40,9 @@ hit.
 ## Usage
 
 ```ts
-import { TenderlyVNet } from '@tenderly/cre-sdk'
+import { TenderlyPreflight } from '@tenderly/cre-preflight'
 
-const tenderly = new TenderlyVNet(runtime.config.tenderly)
+const tenderly = new TenderlyPreflight(runtime.config.tenderly)
 
 const verdict = tenderly.sendTransaction(runtime, {
   from: sender,
@@ -52,22 +56,29 @@ config, because it is usually built from whatever the execution just worked out.
 
 ## Configuration
 
-`TenderlyVNet` takes a plain object, so build it however suits you. Reading it
+`TenderlyPreflight` takes a plain object, so build it however suits you. Reading it
 from `config.json` means you can change it without touching workflow code, which
 is why the examples here do that, but a literal in code works just as well and
 so does a mix:
 
 ```ts
-new TenderlyVNet({
+new TenderlyPreflight({
   ...runtime.config.tenderly,
-  fork: { networkId: '1', at: log.blockNumber.toString() },
+  fork: { networkId: '1', at: 'finalized' },
 })
 ```
+
+Every object is strict: a misspelled key such as `deleteEnviroment` is an error,
+not a setting that is silently ignored while the default stays in force.
 
 The one real constraint is the credential. `accessKeySecretId` is a secret
 **name**, which the library resolves from the CRE Vault at call time. There is
 no field that takes an access key, so the value never appears in config or in
 your workflow source.
+
+Use a Tenderly access key scoped to the one project this workflow forks in, and
+nothing more. The key is read as an ordinary CRE secret, so every node in the
+DON holds it in memory while the workflow runs.
 
 ```jsonc
 {
@@ -81,7 +92,7 @@ your workflow source.
     },
 
     // all optional, shown with their defaults
-    "displayName": "cre-tenderly-sdk",
+    "displayName": "cre-preflight",
     "region": "eu",                           // "us" or "eu"; omit to let Tenderly choose
     "explainReverts": true,
     "includeGasUsed": true,
@@ -97,12 +108,12 @@ your workflow source.
 | `accessKeySecretId` | required | Name of the CRE secret holding your Tenderly access key. |
 | `fork.networkId` | required | Chain id as a decimal string. The chain is derived from this alone. |
 | `fork.at` | required | `"latest"`, `"finalized"`, or a decimal block number. |
-| `displayName` | `cre-tenderly-sdk` | Name the environments appear under in Tenderly. |
+| `displayName` | `cre-preflight` | Name the environments appear under in Tenderly. |
 | `region` | unset | `"us"` or `"eu"`. |
 | `explainReverts` | `true` | Recover the revert reason. Costs one extra HTTP action, and only on the revert path. |
 | `includeGasUsed` | `true` | Report gas. Free, it is already in the receipt. |
 | `deleteEnvironment` | `true` | Delete each node's fork when the transaction finishes. |
-| `maxResponseBytes` | `256000` | Treat a response at or above this as unusable. |
+| `maxResponseBytes` | `256000` | Treat a JSON-RPC response at or above this as unusable. |
 
 ## Choosing the fork block
 
@@ -124,11 +135,17 @@ network, the first call fails with `misconfigured` and `reason` reads
 is the place to check before you deploy.
 
 If your workflow already knows the height it cares about, pass it directly and
-skip the read:
+skip the read. It must be a native `bigint`; a log's `blockNumber` is a protobuf
+BigInt, so convert it first:
 
 ```ts
-tenderly.sendTransaction(runtime, tx, { forkBlockNumber: log.blockNumber })
+import { protoBigIntToBigint } from '@chainlink/cre-sdk'
+
+const forkBlockNumber = log.blockNumber && protoBigIntToBigint(log.blockNumber)
+tenderly.sendTransaction(runtime, tx, { forkBlockNumber })
 ```
+
+When `forkBlockNumber` is `undefined`, `fork.at` is used as usual.
 
 ## Funding and state overrides
 
@@ -180,7 +197,14 @@ testing.
 
 ```ts
 interface TransactionVerdict {
-  outcome: 'success' | 'reverted' | 'rejected' | 'unavailable' | 'oversized' | 'indeterminate'
+  outcome:
+    | 'success'
+    | 'reverted'
+    | 'rejected'
+    | 'misconfigured'
+    | 'unavailable'
+    | 'oversized'
+    | 'indeterminate'
   reverted: boolean
   reason: string  // decoded Error(string) / Panic(uint256) / custom selector
   gasUsed: bigint
@@ -192,8 +216,8 @@ interface TransactionVerdict {
 | `success` | The transaction would succeed. |
 | `reverted` | It executed and reverted. `reason` says why when `explainReverts` is on. |
 | `rejected` | The node refused it before executing, usually insufficient funds for gas. An answer, not a fault: send it and it fails. `reason` carries the node's own words. |
-| `misconfigured` | Tenderly rejected the request itself: an unsupported network, a project that does not exist, a key without permission. `reason` carries Tenderly's own words. Retrying will not help. |
-| `unavailable` | Tenderly could not be reached or did not answer. Says nothing about your transaction. |
+| `misconfigured` | The request can never succeed as written: an unsupported network, a project that does not exist, a key without permission, a secret that cannot be read, a `fund` entry Tenderly cannot apply. `reason` says which. Retrying will not help. |
+| `unavailable` | Tenderly or the chain could not be reached, answered with an error worth retrying (5xx, rate limiting), or gave an answer too incomplete to judge. Says nothing about your transaction. |
 | `oversized` | A response was too large to read. The transaction is too complex to report on this way; nothing is wrong with Tenderly. |
 | `indeterminate` | The nodes did not agree, so no verdict can be trusted. |
 
@@ -201,8 +225,16 @@ Check `outcome`, not just `reverted`. The last four are not failures of your
 transaction and should usually not be treated as one.
 
 `misconfigured` is the one worth alerting on. It means the workflow will keep
-failing every run until someone changes the config or the secret, unlike
-`unavailable`, which usually clears by itself.
+failing every run until someone changes the config, the secret, or the options
+passed with the call, unlike `unavailable`, which usually clears by itself.
+
+`sendTransaction` throws only for invalid arguments: a malformed transaction,
+`fund` entry, state override, or `forkBlockNumber`. Everything that can go wrong
+at run time comes back as a verdict, so switching on `outcome` covers every
+case.
+
+`reason` comes from the node and is passed through as text, with the Admin RPC
+URL and the access key scrubbed out. Treat it as something to log, not to parse.
 
 A disabled field is zeroed (`''`, `0n`) rather than absent, because the verdict
 shape has to be stable across nodes for consensus.
@@ -239,7 +271,7 @@ Per node, per execution:
 | native funding, `stateOverrides` | 0 |
 
 ```ts
-new TenderlyVNet(config).httpActionCost
+new TenderlyPreflight(config).httpActionCost
 // 5 by default, 4 without explainReverts, 3 without deleteEnvironment too
 ```
 
@@ -258,7 +290,10 @@ as `oversized` rather than allowed to look like an outage. Receipt size grows
 with log count, which you do not control, so this can happen on a legitimate
 transaction with a lot of events.
 
-Lower `maxResponseBytes` if you want to fail earlier than the platform would.
+Lower `maxResponseBytes` if you want to fail earlier than the platform would. It
+applies to JSON-RPC responses only. Environment creation is always read up to the
+platform limit, because refusing that response would leave an environment behind
+that nothing knows to delete.
 
 ## Gotchas
 
@@ -267,12 +302,15 @@ by calling `new URL(value)`, and `URL` is `undefined` in QuickJS, so every value
 including a valid one is reported as invalid. If you write your own config
 schema, use a regex instead.
 
-**`gasUsed` is a median across nodes; the decision fields must be unanimous.**
-Blocks mined on a Virtual Environment carry wall-clock timestamps, so nodes execute
-at slightly different `block.timestamp` values. A contract whose gas depends on
-time would otherwise fail consensus over a harmless difference. A strongly
-time-dependent contract can still legitimately disagree, which comes back as
-`indeterminate`.
+**`gasUsed` is a median across nodes; the decision fields must agree.**
+`outcome`, `reverted` and `reason` need a quorum of nodes reporting identical
+values. Blocks mined on a Virtual Environment carry wall-clock timestamps, so
+nodes execute at slightly different `block.timestamp` values. A contract whose
+gas depends on time would otherwise fail consensus over a harmless difference. A
+strongly time-dependent contract can still legitimately disagree, which comes
+back as `indeterminate`. So can a revert message that embeds the timestamp or
+another per-node value: set `explainReverts: false` for such a contract and
+decide on `outcome` alone.
 
 **Nothing environment-specific comes back in the verdict.** Each node has its own
 fork, so its id and URLs cannot survive consensus. They are logged instead.
@@ -284,7 +322,27 @@ bun install
 bun run typecheck
 bun test
 bun run build
+bun run compile:example   # packs the library and compiles the example workflow to WASM
 ```
+
+The SDK's own build-time checks (`cre-compile`'s runtime-compatibility and
+determinism validators) only scan a workflow's local files, never its
+dependencies, so they do not cover this package. `compile:example` runs the real
+compile pipeline against the packed tarball instead, the way a user's workflow
+would consume it.
+
+### Releasing
+
+Releases go through [Changesets](https://github.com/changesets/changesets). Add
+one with your change:
+
+```bash
+bun run changeset
+```
+
+When it lands on `master`, the release workflow opens a "Release" pull request
+that bumps the version and the changelog. Merging that pull request publishes
+to npm with provenance.
 
 ## License
 

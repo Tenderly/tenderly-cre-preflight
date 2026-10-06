@@ -1,5 +1,11 @@
 import { z } from 'zod'
-import { addressSchema, hexDataSchema } from './config.js'
+import { addressSchema, hexDataSchema, hexQuantitySchema } from './config.js'
+import { UINT256_MAX, toHexQuantity } from './hex.js'
+
+const uint256Schema = z
+  .bigint()
+  .nonnegative()
+  .max(UINT256_MAX, 'must fit in 256 bits')
 
 /**
  * A value that can be written as a JSON-RPC QUANTITY.
@@ -11,11 +17,8 @@ import { addressSchema, hexDataSchema } from './config.js'
  * passes through unchanged.
  */
 export const quantitySchema = z
-  .union([
-    z.bigint().nonnegative(),
-    z.string().regex(/^0x(?:0|[1-9a-fA-F][0-9a-fA-F]*)$/, 'must be minimally-encoded hex'),
-  ])
-  .transform((value) => (typeof value === 'bigint' ? `0x${value.toString(16)}` : value))
+  .union([uint256Schema, hexQuantitySchema])
+  .transform((value) => (typeof value === 'bigint' ? toHexQuantity(value) : value))
 
 /**
  * A 32-byte EVM word, used for both storage slots and the values written into
@@ -27,7 +30,7 @@ export const quantitySchema = z
  */
 export const wordSchema = z
   .union([
-    z.bigint().nonnegative(),
+    uint256Schema,
     z.string().regex(/^0x[0-9a-fA-F]{1,64}$/, 'must be hex, at most 32 bytes'),
   ])
   .transform((value) => {
@@ -102,14 +105,16 @@ export const isErc20Entry = (
 export const fundHttpActionCost = (fund: ResolvedFundEntry[]): number =>
   fund.filter(isErc20Entry).length
 
+type AccountOverride = z.output<typeof accountOverrideSchema>
+
 /**
- * Fold native funding into the explicit overrides, producing the second
- * parameter of `tenderly_sendTransaction`.
+ * Fold native funding into the explicit overrides, producing the state override
+ * set the transaction runs against: the second parameter of
+ * `tenderly_sendTransaction`, and the third of the `eth_call` that replays it.
  *
  * Addresses are lower-cased so that two spellings of the same account collapse
- * to one entry. Every node runs this on identical input, so the resulting
- * object has identical key order and the request bodies stay byte-identical,
- * which is what lets the DON's response cache match them.
+ * to one entry. Their `stateDiff` slots are merged rather than replaced, so no
+ * slot the caller asked for is lost to a difference in checksum casing.
  *
  * An explicit `stateOverrides` entry wins over a `fund` entry for the same
  * account: it is the lower-level surface, and the caller reaching for it is
@@ -118,20 +123,25 @@ export const fundHttpActionCost = (fund: ResolvedFundEntry[]): number =>
 export const buildStateOverrides = (
   fund: ResolvedFundEntry[],
   explicit: ResolvedStateOverrides | undefined,
-): Record<string, unknown> | undefined => {
-  const merged: Record<string, Record<string, unknown>> = {}
+): Record<string, AccountOverride> | undefined => {
+  const merged: Record<string, AccountOverride> = {}
 
   for (const entry of fund) {
     if (isErc20Entry(entry)) continue
     for (const address of entry.addresses) {
       const key = address.toLowerCase()
-      merged[key] = { ...(merged[key] ?? {}), balance: entry.balance }
+      merged[key] = { ...merged[key], balance: entry.balance }
     }
   }
 
   for (const [address, override] of Object.entries(explicit ?? {})) {
     const key = address.toLowerCase()
-    merged[key] = { ...(merged[key] ?? {}), ...override }
+    const existing = merged[key]
+    const stateDiff =
+      existing?.stateDiff || override.stateDiff
+        ? { ...existing?.stateDiff, ...override.stateDiff }
+        : undefined
+    merged[key] = { ...existing, ...override, ...(stateDiff ? { stateDiff } : {}) }
   }
 
   return Object.keys(merged).length > 0 ? merged : undefined

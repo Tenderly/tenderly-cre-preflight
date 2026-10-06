@@ -6,11 +6,14 @@ import { ConsensusAggregationByFields, identical, median } from '@chainlink/cre-
  * `rejected`      the node refused the transaction before executing it, most often
  *                 because the sender cannot afford the gas. A real answer, not a
  *                 fault: the transaction would fail if you sent it
- * `misconfigured` Tenderly rejected the request itself: an unsupported network,
- *                 a project that does not exist, an access key without
- *                 permission. Permanent until the config or secret is fixed,
- *                 so retrying is pointless
- * `unavailable`   the nodes agreed that Tenderly could not be reached or answered
+ * `misconfigured` the request itself can never succeed as written: an
+ *                 unsupported network, a project that does not exist, an access
+ *                 key without permission or a secret that cannot be read, a
+ *                 funding entry Tenderly cannot apply. Permanent until the
+ *                 config, secret, or call options change, so retrying is pointless
+ * `unavailable`   Tenderly or the chain could not be reached, answered with an
+ *                 error worth retrying (5xx, rate limiting), or gave an answer
+ *                 too incomplete to judge
  * `oversized`     a response exceeded the HTTP capability's size limit, so the
  *                 transaction could not be inspected. Distinct from
  *                 `unavailable`: nothing is wrong with Tenderly, the
@@ -55,6 +58,10 @@ export interface TransactionVerdict {
    * Why the transaction did not succeed: a decoded revert reason for
    * `reverted`, the node's own words for `rejected`, Tenderly's own words for
    * `misconfigured`, `''` otherwise.
+   *
+   * Aggregated with `identical`, like `outcome`. A revert message that embeds a
+   * per-node value, such as `block.timestamp`, differs on every node and turns
+   * the verdict `indeterminate`; set `explainReverts: false` for such contracts.
    */
   reason: string
   /** Gas used. 0n when unknown. */
@@ -95,7 +102,7 @@ export const rejectedVerdict = (reason: string): TransactionVerdict => ({
 })
 
 /**
- * Tenderly rejected the request as invalid. Distinct from `unavailable` because
+ * The request can never succeed as written. Distinct from `unavailable` because
  * no amount of retrying fixes it: a workflow on a cron would otherwise fail
  * every run while its operator looked at infrastructure instead of config.
  */

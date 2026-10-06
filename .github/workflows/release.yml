@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  push:
+    branches: [master]
+
+concurrency: ${{ github.workflow }}-${{ github.ref }}
+
+permissions:
+  contents: write # push the release commit and tags
+  pull-requests: write # open the "Release" pull request
+  id-token: write # npm provenance, and Trusted Publishing once it is configured
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          # npm 11.5+ for Trusted Publishing; Node 24 ships it.
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - run: bun install --frozen-lockfile
+
+      # With pending changesets this opens or updates the "Release" pull
+      # request. With none, it publishes any version not yet on npm, which is
+      # how merging that pull request releases. `npm publish` runs
+      # prepublishOnly first: typecheck, tests, and a clean build.
+      - uses: changesets/action@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          publish-script: bun run release
+          commit-message: 'chore(release): version packages'
+          pr-title: Release
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: 'true'
