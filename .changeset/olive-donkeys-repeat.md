@@ -12,9 +12,4 @@ region through the library.
 
 Verified against the live API on ethereum, base, arbitrum, polygon and sepolia:
 `eu` and `us-east` are accepted on all of them and the choice appears in the
-Admin RPC hostname (`virtual.mainnet.us-east.rpc.tenderly.co`). `us`,
-`us-west`, `useast` and `US` are all rejected.
-
-`us-west` is left out deliberately. It is named internally alongside the other
-two but currently returns the same `region is invalid` as a nonsense value, so
-including it would reintroduce exactly the bug this fixes.
+Admin RPC hostname (`virtual.mainnet.us-east.rpc.tenderly.co`).
