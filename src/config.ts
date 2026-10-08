@@ -67,17 +67,6 @@ export const tenderlyConfigSchema = z
     /** Name of the CRE secret holding the Tenderly access key. Never the key itself. */
     accessKeySecretId: z.string().min(1, 'secret id must not be empty'),
     displayName: z.string().min(1).max(64).default('cre-preflight'),
-    /**
-     * Which region hosts the environment.
-     *
-     * Verified against the live API: `eu` and `us-east` are accepted on every
-     * network tried (ethereum, base, arbitrum, polygon, sepolia), and the
-     * choice shows up in the Admin RPC hostname. `us-west` is announced
-     * internally but currently returns `region is invalid`, so it is left out
-     * until it works.
-     *
-     * Omit to let Tenderly choose.
-     */
     region: z.enum(['eu', 'us-east']).optional(),
     fork: z
       .object({
