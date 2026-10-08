@@ -1,6 +1,6 @@
 {
   "name": "@tenderly/cre-preflight",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Preflight a transaction on a Tenderly Virtual Environment from inside a Chainlink CRE workflow, and get a consensus-verified verdict back.",
   "license": "MIT",
   "repository": {
