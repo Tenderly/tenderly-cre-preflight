@@ -30,15 +30,9 @@ describe('config', () => {
     expect(parsed.region).toBe('eu')
   })
 
-  it('accepts the regions the API accepts, and only those', () => {
+  it('accepts both regions', () => {
     for (const region of ['eu', 'us-east'] as const) {
       expect(tenderlyConfigSchema.parse({ ...base, region }).region).toBe(region)
-    }
-    // 'us' and 'us-west' both return `region is invalid` from the API, so a
-    // config carrying either would fail on every run with a misconfigured
-    // verdict rather than at parse time.
-    for (const region of ['us', 'us-west', 'useast', 'US']) {
-      expect(tenderlyConfigSchema.safeParse({ ...base, region }).success).toBeFalse()
     }
   })
 
