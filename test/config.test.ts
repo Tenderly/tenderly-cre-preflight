@@ -30,6 +30,18 @@ describe('config', () => {
     expect(parsed.region).toBe('eu')
   })
 
+  it('accepts the regions the API accepts, and only those', () => {
+    for (const region of ['eu', 'us-east'] as const) {
+      expect(tenderlyConfigSchema.parse({ ...base, region }).region).toBe(region)
+    }
+    // 'us' and 'us-west' both return `region is invalid` from the API, so a
+    // config carrying either would fail on every run with a misconfigured
+    // verdict rather than at parse time.
+    for (const region of ['us', 'us-west', 'useast', 'US']) {
+      expect(tenderlyConfigSchema.safeParse({ ...base, region }).success).toBeFalse()
+    }
+  })
+
   it('rejects a fork block that is not pinned', () => {
     expect(() =>
       tenderlyConfigSchema.parse({ ...base, fork: { networkId: '1', at: 'not-a-block' } }),

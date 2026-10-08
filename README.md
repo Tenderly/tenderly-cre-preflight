@@ -93,7 +93,7 @@ DON holds it in memory while the workflow runs.
 
     // all optional, shown with their defaults
     "displayName": "cre-preflight",
-    "region": "eu",                           // "us" or "eu"; omit to let Tenderly choose
+    "region": "eu",                           // "eu" or "us-east"; omit to let Tenderly choose
     "explainReverts": true,
     "includeGasUsed": true,
     "deleteEnvironment": true,
@@ -109,7 +109,7 @@ DON holds it in memory while the workflow runs.
 | `fork.networkId` | required | Chain id as a decimal string. The chain is derived from this alone. |
 | `fork.at` | required | `"latest"`, `"finalized"`, or a decimal block number. |
 | `displayName` | `cre-preflight` | Name the environments appear under in Tenderly. |
-| `region` | unset | `"us"` or `"eu"`. |
+| `region` | unset | `"eu"` or `"us-east"`. Shows up in the Admin RPC hostname. |
 | `explainReverts` | `true` | Recover the revert reason. Costs one extra HTTP action, and only on the revert path. |
 | `includeGasUsed` | `true` | Report gas. Free, it is already in the receipt. |
 | `deleteEnvironment` | `true` | Delete each node's fork when the transaction finishes. |
